@@ -1,0 +1,32 @@
+{
+  "name": "dsh-swarm",
+  "version": "0.5.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Local swarm mode for DeepSeek Harness, inspired by Google Antigravity /swarm: a lead splits a task into parallel workers (high) plus fresh verifiers (max) and a stall monitor (low), defaulting to opencode-go deepseek-v4.1-flash. In a Git repo each worker gets its own Git worktree and branch (DSH create_worktree) and the lead merges branches back. Includes the Swarm side pane (Board, Members, Graph, stall detection, coordinator context, session cost).",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": ["cordis.patch.yml", "README.md", "LICENSE", "lib/index.js", "lib/client.js"],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.4 <5.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ],
+      "platform": "web"
+    }
+  }
+}

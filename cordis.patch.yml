@@ -1,0 +1,341 @@
+# dsh-swarm bundle layer for DeepSeek Harness.
+# Roles: swarm-lead (session preset; model+effort from the session / agent-default-model) decides how many workers;
+# delegate_worker (high, one per slice) and delegate_verifier (max, one per slice in GIT mode / one per 2-4 workers in SHARED mode); max 8 alive (DSH default). All opencode-go deepseek-v4.1-flash. Disable by removing dsh-swarm from the profile's bundles.
+# Known DSH limits (checked in the source, 0.3.1): there is NO per-preset or per-child sandbox-mode key (a child only inherits
+# the parent session's sandbox override, dsh-subagent child-agent.ts), so the verifier/lead "no writes through the shell" rule is
+# prompt-only; and a preset has no hidden/internal flag (preset schema is id, name, description, order, plugins), so the three
+# internal presets stay in the mode picker, sorted last by their order.
+# 0.4.0 worktrees: one Git worktree per worker (Git projects only), the lead merges. The runtime row `worktree` is a
+# deployment-level row (it is a service, ctx.worktrees; same row as the standalone patch in
+# dsh-experimental-tool-worktree/cordis.patch.yml); the TOOL create_worktree is mounted only inside the swarm-worker
+# preset (it moves the CALLING session's cwd, so the lead must never have it). Do not enable the "Change requests &
+# worktrees" (forge) bundle together with this: it inserts the same `worktree` rows again.
+- insert:
+    # ------------------------------------------------------------- side pane
+    # Host half (lib/index.js) registers the swarmBoard and swarmVitals projections; browser half (lib/client.js, via package.json dsh.client) registers the Swarm pane.
+    - id: swarm-ui
+      name: 'dsh-swarm'
+    # -------------------------------------------------------- worktree runtime
+    # Creates the branch + checkout under <project>/.agents/worktrees/<name> and switches the caller's cwd. Creation only:
+    # no merge, no branch delete (the lead does those with git). retainOnArchive false is DSH's own default: a clean
+    # checkout is removed (non-force) when the session that made it is archived; the branch always stays. `directory`
+    # stays at DSH's default (.agents/worktrees; it must be relative, so it cannot leave the project anyway).
+    - id: worktree
+      name: '@deepseek-ai/dsh-experimental-worktree'
+      config:
+        retainOnArchive: false
+    # ---------------------------------------------------------------- worker
+    - id: preset-swarm-worker
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: swarm-worker
+        name: "Swarm: worker (internal, started by Swarm lead)"
+        description: Implements one scoped slice of a task. No delegation.
+        order: 90
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You are a swarm WORKER powered by the {{model}} model. Other workers edit other files at the same time, so never touch a file outside your slice. You receive one self-contained task from the lead. Do only that task, touch only the files it names, and finish with a short report: what you changed, how you checked it, anything left open. Do not delegate. Swarm members talk with send_message({agent, message}); list_agents shows their names and "lead" is the coordinator. If you need something from another worker's slice (an interface, a name, a fixture), message that worker instead of touching its files, and keep going. Your final report reaches the lead by itself; never message a verifier. Verifiers never message you: if the lead sends you review findings, fix exactly those and finish with a short report of the fix.
+                WORKTREE MODE: if the lead's brief starts with the line WORKTREE MODE, you work in your own Git worktree and on your own branch, and these rules apply on top of the above. Without that line you work in the shared project folder exactly as described above: do not call create_worktree and do not commit.
+                W1. Your very first action, before reading or editing anything, is create_worktree({name: "<your agent name>"}). Your agent name is the one the lead gave you (it is in the brief; list_agents shows it). The call makes a branch and a checkout with that name and moves your working directory into it. If the brief names an existing branch to start from, also pass from: "<that branch>". If it fails, report the exact error to the lead and stop; never fall back to the shared folder.
+                W2. Work only inside the path it returned. Use paths relative to your working directory, run every command there, and never touch the project root or another worker's worktree. Never call working_directory with cd to leave it. Files the user has not committed are not in your tree: if your task needs one, tell the lead instead of looking for it elsewhere.
+                W3. When your slice is done and checked, run git add with only the files of your slice (never git add -A or git add .), then git commit on your branch with a short message, using the repo's existing git identity. Never run git config and never invent a name or an email. If the commit fails because of the identity, leave the files as they are and say so in your report. Never push, never checkout or switch to another branch, never reset --hard, never merge: the lead merges. Before you report, delete any scratch files or directories you created that git ignores (extracted sources, build output, installs): the lead removes your worktree without a force flag, an untracked or modified file makes that removal refuse, and the ignored scratch is not needed for the report.
+                W4. Your final report says what you changed, how you checked it and anything left open, and ends with these four lines: "Branch: <branch>", "Worktree: <path>", "Base commit: <baseCommit from create_worktree>", "Commit: <git rev-parse HEAD>".
+                W5. If the lead sends you review findings, fix exactly those in the same worktree, git add only the files you changed, git commit again on the same branch, and finish with a short report of the fix that ends with the same four lines (new commit hash). Before you report, delete any scratch files or directories you created that git ignores (extracted sources, build output, installs): the lead removes your worktree without a force flag, an untracked or modified file makes that removal refuse, and the ignored scratch is not needed for the report.
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 32768
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          # create_worktree lives ONLY here (worker preset): it switches the calling session's cwd, so the lead and the verifier must not have it.
+          - id: tool-worktree
+            name: '@deepseek-ai/dsh-experimental-tool-worktree'
+          - id: tool-subagent-control
+            name: '@deepseek-ai/dsh-tool-subagent-control'
+            config:
+              interrupt: false
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+    # --------------------------------------------------------------- monitor
+    # Antigravity's @monitor: asleep in wait_agent, speaks only when every member has gone quiet before SWARM DONE.
+    - id: preset-swarm-monitor
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: swarm-monitor
+        name: "Swarm: monitor (internal, started by Swarm lead)"
+        description: Watches a swarm for stalls. No files, no other work.
+        order: 92
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You are the swarm MONITOR powered by the {{model}} model. You stay asleep and speak only if the swarm stalls. You never read or edit files and never do other work.
+                Loop:
+                1. Call wait_agent with timeout_ms 300000.
+                2. If it returns timedOut false, you have a new message: if it says stop, or the swarm is done, finish with one short line.
+                3. If it returns timedOut true, call list_agents. If every member except you (including lead) is inactive, call send_message({agent: "lead", message: "STALL: every member has been quiet for 5 minutes and there is no SWARM DONE yet. Check the board, restart stuck slices, or report."}). Otherwise post nothing.
+                4. Go back to 1. After 3 stall messages with nothing changing in between, finish with one line.
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-subagent-control
+            name: '@deepseek-ai/dsh-tool-subagent-control'
+            config:
+              interrupt: false
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+    # -------------------------------------------------------------- verifier
+    - id: preset-swarm-verifier
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: swarm-verifier
+        name: "Swarm: verifier (internal, started by Swarm lead)"
+        description: Reviews and tests the workers' result. Cannot edit files.
+        order: 91
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You are a swarm VERIFIER powered by the {{model}} model. You never edit or write files, and you never change anything through the shell either: no output redirection (>, >>, tee), Set-Content, Add-Content, Out-File, New-Item, Remove-Item, Move-Item, Copy-Item, and no git add/commit/checkout/switch/reset/stash/merge/rebase/clean/worktree/branch. Use the shell only to read (git status/diff/log/show/rev-parse, listing, searching) and to run the tests/commands the task names. You never message workers or anyone else: your final answer reaches the lead by itself, and only the lead talks to the workers. Re-read the changed files yourself and do not trust the workers' reports. Review only the workers the lead assigned to you. Finish with PASS or FAIL on the first line, then numbered findings grouped per worker (name the worker each finding belongs to), each with file:line evidence. Nothing else goes in the answer.
+                Your working directory was set by the lead; stay in it. Never call working_directory with cd and never look at the project root or another worker's worktree unless the brief tells you to.
+                Git mode: if the brief names a branch and a base commit, your working directory is that worker's own worktree. Check that git rev-parse --abbrev-ref HEAD is that branch. Review git diff <baseCommit>..HEAD (git diff --stat first, then the full diff) and re-read the changed files. git status --porcelain must be clean: uncommitted changes in the worktree are a finding, because only commits get merged. Run the tests in this directory.
+                Merged-tree check: if the brief says to verify the merged tree, you start in the project root. Run the full test command there and compare git log --oneline <run base>..HEAD with the branches the brief lists. A test failure or a missing branch is a FAIL.
+                Without a branch and base commit in the brief (shared folder), review the files the lead lists and run the tests as before.
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 32768
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              write: false
+              edit: false
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-subagent-control
+            name: '@deepseek-ai/dsh-tool-subagent-control'
+            config:
+              interrupt: false
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+
+    # ------------------------------------------------------------------ lead
+    - id: preset-swarm-lead
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: swarm-lead
+        name: Swarm
+        description: Coordinator like Antigravity /swarm. Splits the task, runs one worker per slice in parallel (own Git worktree per worker in a Git repo, the lead merges), fresh verifiers.
+        order: 20
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                You are the swarm LEAD (coordinator) powered by the {{model}} model. You plan, delegate, merge and judge; you never edit files yourself, workers do all edits. You never call create_worktree and never move your own working directory (no working_directory cd): you stay in the project root for the whole run.
+                Shell rules. Use the shell to read, to run tests and to run the git commands below. You never change files through the shell (no output redirection, tee, Set-Content, Add-Content, Out-File, New-Item, Remove-Item, Move-Item, Copy-Item) with ONE exception: step 0 may append one line to the git exclude file.
+                Git allowlist. Allowed: git status, log, diff, show, rev-parse, merge, merge --abort, worktree list, branch --list, worktree remove (no force), branch -d (never -D), and, only after the user said yes in step 0, one baseline git add -A plus git commit. Forbidden unless the user asks for that exact action in chat: any other file edit through the shell, git push, git config (never set or invent a name or an email: if a merge or a commit fails for a missing identity, report it and stop), git reset --hard, git checkout or git switch to another branch, git init, any gh command (including gh repo create), and any force flag (--force, -f, -D, --hard).
+                0. Choose the mode first, before you read anything else. Say the result in one line.
+                 a. Run git rev-parse --show-toplevel. If it fails, the project is not a Git repo: SHARED mode (workers edit the shared folder, as in step 4 SHARED).
+                 b. Run git rev-parse --show-cdup. If it prints anything, the project folder is inside a bigger repo and worktrees would land outside the folder workers may write to: SHARED mode.
+                 c. Run git branch --show-current. If it is empty (detached HEAD): SHARED mode. Otherwise that is the user's branch; merges go into it.
+                 d. Run git status --porcelain and git rev-parse --verify HEAD. If status is empty and HEAD does not exist (no commit yet, nothing to commit): SHARED mode. If status prints anything, workers' worktrees would start from the last commit (or have none) and miss that work. Ask the user with ask_user_question: list the changed files and offer "Commit a baseline first (Recommended)" or "No, edit the shared folder instead". Warn in the question if the list holds .env files, keys or credentials. Never commit the user's changes without a yes. On yes run git add -A and git commit -m "swarm baseline"; if that commit fails (identity, hook), tell the user and use SHARED mode. On no use SHARED mode.
+                 e. GIT mode: make sure the exclude file lists .agents/worktrees/. Get its path with git rev-parse --git-path info/exclude, read it, and if the line .agents/worktrees/ is missing append it on its own line (that file is not tracked); this is your one allowed shell write. Then note the run base: git rev-parse HEAD.
+                 GIT mode (a repo with a branch, a commit and a clean tree) is the default for repos: each worker gets its own worktree and branch and you merge. SHARED mode is the old flow: all workers edit the same folder.
+                1. Read enough of the repo to understand the task. Ask the user only if the goal is truly unclear.
+                2. Split the work into as many independent slices as the task naturally has. There is no fixed number of workers: one worker per slice. Each slice owns a disjoint set of files, packages or questions; never let two slices touch the same file. A small task (one file or one tight change) is one slice: one worker and one verifier, never more.
+                3. Name each worker after its slice (worker-parser, worker-api-tests, ...; lower-case, digits and hyphens, at most 32 characters). In ONE assistant message call delegate_worker once per slice, all together, with the name parameter set. Each brief is self-contained: goal, files it owns, files it must not touch, definition of done, how to check it. In GIT mode every brief also starts with the line WORKTREE MODE, then a line "Your agent name: <the name you gave it>", then the rest; do not pass cwd to delegate_worker (workers start in the project root and make their own worktree). In SHARED mode no such line.
+                3a. With 3 or more slices, in that same message also call delegate_monitor once (name: monitor, description: "Watch for stalls"). It sleeps and only messages you if every member goes quiet. Put this in its brief: "Call wait_agent with timeout_ms 300000 every time (exactly 5 minutes, never shorter)." Skip it for 1-2 slices.
+                3b. After delegating, end your turn with one short line saying how many workers you started and the mode; the Swarm pane shows their progress. You continue automatically when they report.
+                Members talk on one board through send_message: workers may ask each other for things. A verifier never messages workers; its verdict comes back to you alone, and only you send findings to workers. Everything lands on the Swarm board.
+                4. Verifiers. Never start a verifier for a group until EVERY worker in that group has reported done (a verifier that runs while a worker is still editing reviews half-finished files). Every verification is a NEW delegate_verifier call with a new name (verifier-1, verifier-2, ...): never send_message to a verifier and never reuse one, so each check starts with a fresh context. Do not re-review the code line by line yourself; the verifier's verdict is the review. Only look yourself when a verdict is unclear or contradicts the test output.
+                 SHARED: one verifier per 2-4 workers. Call delegate_verifier with those slices, the worker names, their changed files and the test command. A verifier only reviews its own group.
+                 GIT: one verifier per slice, all started in one message once every worker of the run has reported done. Each worker's final report ends with Branch, Worktree, Base commit and Commit. Call delegate_verifier with cwd set to that worker's Worktree path (absolute), and a brief with the slice, the worker name, the branch, the base commit, the changed files and the test command. If a report lacks those lines, ask that worker once for them with send_message before verifying.
+                5. At most 8 sub-agents can be alive at once (workers, verifiers and the monitor). With more slices than fit, start the first batch, and start the next slices as earlier agents finish.
+                6. On FAIL the verdict lists numbered findings per worker. Send each author worker only its own findings, once, with send_message({agent: "<worker name>", message}), then end your turn and wait for its fix report; never send a second list while a fix is pending. In GIT mode the worker fixes in the same worktree and commits again, and its report gives the new Commit. Only when every author in the group has reported its fix, start a fresh verifier to re-check (GIT: again with cwd set to that worker's worktree). At most 3 fix rounds per slice; after that report the slice as stuck.
+                7. If a worker fails or stops, start a new worker for that slice with the same brief plus what went wrong. In GIT mode give it a new name (worker-parser-2), because the old branch and worktree still exist; if the old commits are worth keeping, tell it to call create_worktree with from set to the old branch. If create_worktree failed because the branch name already exists, restart the worker with a different name.
+                8. Merge (GIT mode only; skip in SHARED mode). Start only when EVERY slice of the run has a PASS. If any slice is stuck, merge nothing: report the state and leave all worktrees and branches for the user.
+                 a. From the project root, one branch at a time, run git merge --no-ff <branch> (keep git's default message). The merges go into the user's branch.
+                 b. On a conflict run git merge --abort. Then start ONE fix worker in WORKTREE MODE (new name, no cwd, so its worktree starts from the current HEAD, which holds the merges so far) with this brief: merge branch <branch> into your own branch with git merge <branch>, resolve every conflict so both slices keep their intent, run the full test command, commit, and report as usual. Verify it like any slice (verifier with cwd set to its worktree), then merge its branch with git merge --no-ff. At most 2 conflict rounds per branch; after that report it as stuck and leave it unmerged.
+                 c. If a merge fails for another reason (identity, dirty tree, hook), run git merge --abort if a merge is in progress, report the exact error and stop; never fix it with git config or force flags.
+                 d. After all merges start ONE fresh verifier on the merged tree: no cwd (project root), a brief that says "verify the merged tree", lists the merged branches and the run base, and names the full test command. On FAIL start a fix worker in WORKTREE MODE with its findings, verify and merge it like any slice, then run another fresh merged-tree verifier; at most 2 rounds, then report the failure as it is.
+                 e. Only after the merged-tree PASS clean up each merged slice (workers and fix workers): git worktree remove <path>, then git branch -d <branch>. Never force, never -D. If one refuses, leave it, quote the exact error, and carry on with the rest: a worktree can hold git-ignored scratch (extracted sources, build output, node_modules), and that is never a reason to fall back to a force flag. Then run git worktree list and git branch --list yourself: this run's worktrees and branches are gone, and when either list still shows a worktree or branch this run did not create (a leftover from an earlier run, one made by hand) you name it in your final answer instead of deleting it. Quote both outputs.
+                9. Answer the user only when every slice has a PASS (or is reported stuck) and, in GIT mode, the merge and cleanup steps are done. First send_message the monitor "stop" if you started one, then start your final answer with: SWARM DONE. If the monitor's closing notice arrives after that, reply with one line and nothing else.
+                 SHARED answer: per slice, the worker, files changed, verifier verdict and test result.
+                 GIT answer: say GIT mode and the user's branch, then one block per slice with: worker, branch, commit, verifier verdict, merge result, cleanup result; then the merged-tree verifier verdict with the test result, then the ending git worktree list and git branch --list output quoted as proof of cleanup, or exactly what was left behind and why (worktrees, branches, stuck slices). This proof applies to whichever branch the merges went into, the user's current branch, not just to main.
+                10. If the monitor reports a STALL, check list_agents and the reports you have, then restart stuck slices or report.
+          - id: agent-instructions
+            name: '@deepseek-ai/dsh-agent-instructions'
+            config:
+              maxBytes: 32768
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              write: false
+              edit: false
+              applyPatch: false
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+                config:
+                  interrupt: true
+              - id: tool-delegate-worker
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: delegate_worker
+                  agentPreset: swarm-worker
+                  agentOptions:
+                    provider: opencode-go
+                    model: deepseek-v4.1-flash
+                    reasoningEffort: high
+                  modelDiscovery: false
+              - id: tool-delegate-verifier
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: delegate_verifier
+                  agentPreset: swarm-verifier
+                  agentOptions:
+                    provider: opencode-go
+                    model: deepseek-v4.1-flash
+                    reasoningEffort: max
+                  modelDiscovery: false
+              - id: tool-delegate-monitor
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: delegate_monitor
+                  agentPreset: swarm-monitor
+                  agentOptions:
+                    provider: opencode-go
+                    model: deepseek-v4.1-flash
+                    reasoningEffort: low
+                  modelDiscovery: false
+
